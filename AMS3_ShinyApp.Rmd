@@ -1,0 +1,210 @@
+---
+title: "Conditional Queries"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: columns
+    vertical_layout: fill
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(shiny)
+library(dplyr)
+library(plotly)
+library(readr)
+library(tidyverse)
+library(stringr)
+library(dplyr)
+library(naniar)
+library(bnlearn)
+library(Rgraphviz)
+library(graph)
+library(gRain)
+library(bnviewer)
+library(shinyWidgets)
+library(shinyjs)
+#functions----------------------------------------------------------------------
+map <- function(joint) {
+  stopifnot(!is.null(dim(joint)))
+  ind_max <- which(sapply(joint, function(v) isTRUE(all.equal(max(joint), v))))
+  if (length(ind_max) > 1) {
+    warning("More than one MAP. Chosing one randomly.")
+    oind_max <- ind_max
+    ind_max <- sample(ind_max, size = 1)
+    stopifnot(ind_max %in% oind_max)
+  }
+  ind <- arrayInd(ind_max, .dim = dim(joint))
+  state <- mapply('[', dimnames(joint), ind)
+  prob <- joint[ind_max]
+  list(state=state, prob=prob)
+}
+
+cpq.fun1<- function(EvidenceNode, EvidenceState, ObjectiveNode) {
+prv <- c()
+k = setEvidence(jn, nodes = EvidenceNode, states = EvidenceState)
+list <- round(querygrain(k, nodes = ObjectiveNode, type = "joint"), 2)
+list1 <- sort(list, decreasing = TRUE)
+theo <- data.frame(list)
+colnames(theo) <- c("col") 
+names <- rownames(theo)
+val <- c()
+for(i in 1: nrow(theo)) {val[i] <- (theo$col[i])}
+prv <- data.frame("outcomes" = names, "percentage" = val)
+return(prv)
+}
+```
+
+```{r data}
+setwd("C:/Users/Guido/Desktop/Advanced Multivariate Statistics/Project/INAIL/WorkingDirectory")
+
+data <- read_delim("ImpData.csv", delim = ";", escape_double = FALSE,
+                   trim_ws = TRUE)
+
+data <- data %>% select(-c(type_disease, causal_code, Gestione, sector_work))
+
+#rename data for better comprension---------------------------------------------
+data <- data %>% rename(
+  work.sector = subsector_work,
+  disease = group_disease,
+  injury.factor = causal_sector, 
+  asbestos = absestos, 
+  impairment.level = ILW
+)
+
+#factor-------------------------------------------------------------------------
+data <- as.data.frame(unclass(data), stringsAsFactors = TRUE)
+data$death <- as.factor(data$death)
+
+vars <- colnames(data)
+
+```
+
+```{r}
+bn <- hc(data)
+bn <- drop.arc(bn, "gender", "disease")
+bn <- drop.arc(bn, "gender", "impairment.level")
+bn <- drop.arc(bn, "region", "gender")
+bn <- drop.arc(bn, "impairment.level", "death")
+bn <- drop.arc(bn, "work.sector", "impairment.level")
+bn <- reverse.arc(bn, "disease", "injury.factor", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- reverse.arc(bn, "injury.factor", "asbestos", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "region", "asbestos", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "disease", "impairment.level", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "injury.factor", "impairment.level", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "asbestos", "death", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+cpt <- bn.fit(bn, data = data)
+jn = compile(as.grain(cpt))
+```
+
+
+```{r}
+ooutcomes <- c()
+var <- c()
+for(i in 1: length((vars))){
+  kalulu <- levels(data[, vars[i]])
+  for(j in 1:length(kalulu)) {
+     ooutcomes <- base::append(ooutcomes, kalulu[j])
+     var <- base::append(var, vars[i])
+  }
+}
+outc <- data.frame("var" = var, "ooutcome" = ooutcomes)
+
+outcome <- unique(outc$ooutcome)
+varr <- base::unique(outc$var)
+```
+
+
+
+<!------------------------------------------------------------------------------
+---------------------------------- PAGE 1 --------------------------------------
+------------------------------------------------------------------------------->
+
+Column {.sidebar data-width=420}
+-----------------------------------------------------------------------
+
+```{r}
+# selectInput("event", label = "Select Event Variable:", choices = vars)
+# 
+# selectInput("evidence_variable", label = "Select Evidence Variable:", choices = base::unique(outc$var))
+# 
+# selectInput("evidence_Outcome", label = "Select Evidence Outcome:", choices = outcome)
+useShinyjs(rmd = TRUE)
+
+pickerInput(
+   inputId = "event",
+   label = "Event", 
+   choices = vars,
+   selected = vars[4],
+   options = list(
+      `actions-box` = TRUE), 
+    multiple = FALSE
+)
+
+
+br() 
+hr()
+hr() 
+br() 
+
+pickerInput(
+   inputId = "evidence_variable",
+   label = "Evidence Variable", 
+   choices = varr,
+   selected = varr[1],
+   options = list(
+      `actions-box` = TRUE), 
+    multiple = FALSE
+)
+pickerInput(
+   inputId = "evidence_outcome",
+   label = "Evidence Outcome", 
+   choices = outcome,
+   selected = outcome[1],
+   options = list(
+      `actions-box` = TRUE), 
+    multiple = FALSE
+)
+
+
+```
+
+
+Column
+--------------------------------------------------------------------------------
+
+### Chart 1 
+
+```{r}
+  renderPlotly({
+  EVIVAR <- reactiveValues()
+  EVIVAR$a = as.character(req(input$evidence_variable))
+  EVIVAR$b = as.character(req(input$evidence_outcome))
+  EVIVAR$c = as.character(req(input$event))
+  # evi_var <- as.character(input$evidence_variable)
+  # evi_out <- as.character(input$input$evidence_outcome)
+  # eve <- as.character(input$event)
+  prv <- cpq.fun1(EVIVAR$a, EVIVAR$b, EVIVAR$c)
+
+  ggplotly(
+    ggplot(prv, aes(x = outcomes, y = percentage))+ 
+      geom_bar(stat = "identity")+ 
+      labs(x = "outcomes", y = "percentage")+
+      theme(panel.background = element_rect(fill = 'white', color = 'white'),
+          panel.grid.major = element_line(color = 'grey', linetype = 'dotted'),
+          panel.grid.minor = element_line(color = 'white', size = 0.25),
+          axis.text.x = element_text(angle = 65, vjust = 0.5, hjust=1)) +
+      scale_x_discrete(labels = function(x) str_wrap(prv$outcomes, width = 15))
+  )
+})
+```
+
+<!------------------------------------------------------------------------------
+---------------------------------- PAGE 2 --------------------------------------
+------------------------------------------------------------------------------->

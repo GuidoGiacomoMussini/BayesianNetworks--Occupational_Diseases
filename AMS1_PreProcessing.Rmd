@@ -1,0 +1,612 @@
+---
+title: "AMS_Project"
+author: "GuidoGIacomoMussini"
+date: "2023-01-03"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+Chunk 1: Libraries 
+```{r}
+gc()
+library(readr)
+library(readxl)
+library(tidyverse)
+library(dplyr)
+library(naniar)
+library(superheat)
+library(stringr)
+library(missForest)
+```
+
+Chunk 2: Set WD and Import the Data
+```{r}
+setwd("C:/Users/Guido/Desktop/Advanced Multivariate Statistics/Project/INAIL/WorkingDirectory")
+#https://dati.inail.it/opendata/default/Daticadenzasemestralemp/index.html
+#Data---------------------------------------------------------------------------
+data <- read_delim("Data.csv", delim = ";", escape_double = FALSE, 
+                   trim_ws = TRUE)
+
+#Topological data---------------------------------------------------------------
+AgenteCausale <- read_delim("AgenteCausale.csv", delim = ";", 
+                            escape_double = FALSE, trim_ws = TRUE)
+AgenteCausale <- AgenteCausale[, -(2:4)]
+AgenteCausale$AgenteCausale <- as.character(AgenteCausale$AgenteCausale)
+
+#-------------------------------------------------------------------------------
+LuogoNascita <-read_excel("CodiceCatastale.xlsx") #http://www.globallaboratory.it/pit/TB_STATIESTERI1.htm
+#-------------------------------------------------------------------------------
+Provincia <- read_delim("Provincia.csv", delim = ";", escape_double = FALSE, 
+                        trim_ws = TRUE)
+Provincia <- Provincia %>% select(Provincia, CodRegione, DescrMacroregione)
+Provincia$Provincia <- as.integer(Provincia$Provincia)
+
+#-------------------------------------------------------------------------------
+SettoreCorrelatoMalattia <- read_delim("SettoreCorrelatoMalattia.csv", 
+                                       delim = ";", escape_double = FALSE, 
+                                       trim_ws = TRUE)
+
+SubSettoreCorrelatoMalattia <- read_delim("SubSettoreCorrelatoMalattia.csv", 
+                                          delim = ";", escape_double = FALSE, 
+                                          trim_ws = TRUE)
+
+#-------------------------------------------------------------------------------
+TipologiaICDX <- read_delim("TipologiaICDX.csv", delim = ";", 
+                            escape_double = FALSE, trim_ws = TRUE)
+TipologiaICDX <- TipologiaICDX[,-c(3:4)]
+
+#-------------------------------------------------------------------------------
+MalattiaAsbestoCorrelata <- read_delim("MalattiaAsbestoCorrelata.csv", 
+                                       delim = ";", escape_double = FALSE, 
+                                       trim_ws = TRUE)
+```
+
+
+------------------Building the final Dataset------------------------------------
+
+Chunk 3: Modifying Columuns and Join datasets 
+```{r}
+
+data <- data  %>% rename(ICDX = ICD10denunciato,
+                         Provincia = SedeInailCompetente
+                           )
+#DataMorte----------------------------------------------------------------------
+#set 0 if the worker is alive, 1 if dead
+data$DataMorte <- ifelse(is.na(data$DataMorte), 0, 1) 
+data$DataMorte <- as.factor(data$DataMorte)
+
+
+#LuogoNascita-------------------------------------------------------------------
+data <- data %>% left_join(LuogoNascita, by = "LuogoNascita")
+data$Continente <-ifelse(is.na(data$Continente), 'Italia', data$Continente)
+
+#Settore/SubSettoreCorrelato Malattia-------------------------------------------
+data <- data %>% left_join(SettoreCorrelatoMalattia, 
+                           by = "SettoreCorrelatoMalattia")
+
+data <- data %>% left_join(SubSettoreCorrelatoMalattia, 
+                           by = "SubSettoreCorrelatoMalattia")
+
+#ICDX---------------------------------------------------------------------------
+data <- data %>% left_join(TipologiaICDX, by = "ICDX")
+
+#AgenteCausale------------------------------------------------------------------
+data <- data %>% left_join(AgenteCausale, by = "AgenteCausale")
+
+#Provincia----------------------------------------------------------------------
+data <- data %>% left_join(Provincia, by = "Provincia")
+
+#Delete useless variables-------------------------------------------------------
+data <- data %>% select(-c(Provincia, LuogoNascita, SettoreCorrelatoMalattia,
+                           SubSettoreCorrelatoMalattia, ICDX, AgenteCausale, 
+                           CodRegione, GradoMenomazioneCaso, GiorniIndennizzati))
+
+#Remove useless datasets--------------------------------------------------------
+rm(AgenteCausale, LuogoNascita, MalattiaAsbestoCorrelata, Provincia, 
+   SettoreCorrelatoMalattia, SubSettoreCorrelatoMalattia, TipologiaICDX)
+```
+
+Chunk 4: Removing Useless Columns and Rename other columns
+```{r}
+data <- data %>% select(-c(DataRilevazione, DataProtocollo, DataDefinizione,
+                           IdentificativoLavoratore, ICD10accertato,
+                           QualificazioneLegge, IdentificativoCaso,
+                           DefinizioneAmministrativaCaso,
+                           DefinizioneAmministrativaLavoratore,
+                           DefinizioneAmministrativaEsitoMortale,
+                           Indennizzo, SettoreICDX)) %>% rename(
+  death = DataMorte,
+  gender = Genere,
+  absestos = MalattiaAsbestoCorrelata,
+  ILW = GradoMenomazioneLavoratore, #impairment level of the worker
+  nationality = Continente,
+  sector_work = DescrSettoreCorrelato, #work sector
+  subsector_work = DescrSubSettoreCorrelato, #work subsector 
+  type_disease = DescrICDX,
+  group_disease = DescrSettoreICDX,
+  causal_sector = DescrGrandeGruppo,
+  causal_code = GrandeGruppo,
+  region = DescrMacroregione
+)
+```
+
+Chunk 5: Modify the variables inserting the NA where necessary
+```{r}
+data$sector_work <- ifelse(data$sector_work == "Non Determinato", NA,  
+                           data$sector_work)
+data$subsector_work <- ifelse(data$subsector_work == "Non Determinato", NA, 
+                              data$subsector_work)
+data$type_disease <- ifelse(data$type_disease == "Non Determinato", NA, 
+                              data$type_disease)
+data$group_disease <- ifelse(data$group_disease == "Non Determinato", NA, 
+                              data$group_disease)
+data$causal_sector<- ifelse(data$causal_sector == "Ancora da determinare", NA,  
+                           data$causal_sector)
+#to mantain the correspondance with causal code, i modify even that variable.
+data$causal_code<- ifelse(is.na(data$causal_sector) , NA,  
+                           data$causal_code)
+
+#numeric to factor--------------------------------------------------------------
+
+data$ILW <- ifelse(data$ILW < 25, "low", 
+                   ifelse(data$ILW>24 & data$ILW < 50, "medium", "high"))
+data$ILW <- as.factor(data$ILW)
+
+```
+
+Chunk 6: Rename some variables and reduce the cardinality
+```{r}
+#Group disease------------------------------------------------------------------
+data$group_disease <- ifelse(data$group_disease == "Alcune malattie infettive e parassitarie (A00-B99)", 
+                             "Infectious and parasitic diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Disturbi psichici e comportamentali (F00-F99)", 
+                             "mental and behavioral disorders", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie del sangue e degli organi ematopoietici ed alcuni disturbi del sistema immunitario (D50-D89)", 
+                             "Blood-related diseases and immune system disorders", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie del sistema circolatorio (I00-I99)", 
+                             "circulatory system diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie del sistema nervoso (G00-G99)", 
+                             "Nervous system diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie del sistema osteomuscolare e del tessuto connettivo (M00-M99)", 
+                             " osteomuscular system and connective tissue diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie del sistema respiratorio (J00-J99)", 
+                             "Respiratory system diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie dell'apparato digerente (K00-K93)", 
+                             "Digestive system diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie dell'apparato genitourinario (N00-N99)", 
+                             "Genitourinary system diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie dell'occhio e degli annessi oculari (H00-H59)", 
+                             "Eyesight-related diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie dell'orecchio e dell'apofisi mastoide (H60-H95)", 
+                             "Hearing-related diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie della cute e del tessuto sottocutaneo (L00-L99)", 
+                             "Skin and subcutaneous tissue diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Malattie endocrine, nutrizionali e metaboliche (E00-E90)", 
+                             "Endocrine, nutritional and metabolic diseases", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Sintomi, segni e risultati anormali di esami clinici e di laboratorio non classificati altrove(R00-R99)", 
+                             "Not classified abnormal symptoms", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Traumatismi, avvelenamenti ed alcune altre conseguenze di cause esterne (S00-T98)", 
+                             "Trauma and poisoning", 
+                             data$group_disease)
+data$group_disease <- ifelse(data$group_disease == "Tumori (C00-D48)", 
+                             "Cancer", 
+                             data$group_disease)
+
+#subsector_work-----------------------------------------------------------------
+data$subsector_work <- ifelse(data$subsector_work == "ALBERGHI E RISTORANTI","turism", data$subsector_work)
+data$subsector_work <- ifelse(data$subsector_work == "ALIMENTARE", "food", data$subsector_work)
+data$subsector_work <- ifelse(data$subsector_work == "ALTRE MANIFATTURIERE (GIOIELLERIA E OREFICERIA, STRUMENTI MUSICALI, ECC.)", "manifactures", data$subsector_work) 
+data$subsector_work <- ifelse(data$subsector_work == "METALMECCANICA (METALLURGIA,METALMECCANICA, MACCHINE, APPARECCHI E STRUMENTI)", "metal working", data$subsector_work)
+data$subsector_work <- ifelse(data$subsector_work == "MINERARIA", "mining", data$subsector_work)
+data$subsector_work <- ifelse(data$subsector_work == "SANITA' PRIVATA E SERVIZI SOCIALI PRIVATI", "healthcare", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "ALLEVAMENTO"  |
+                                data$subsector_work == "ALTRE COLTIVAZIONI AGRICOLE" |
+                                data$subsector_work == "COLTIVAZIONI DI SEMINATIVI" |
+                                data$subsector_work == "FRUTTICOLTURA" |
+                                data$subsector_work == "ORTICOLTURA, FLORICOLTURA" |
+                                data$subsector_work == "PESCA - PISCICOLTURA" |
+                                data$subsector_work == "SILVICOLTURA", 
+                              "farming", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "CHIMICA"  |
+                                data$subsector_work == "CONCIARIA" |
+                                data$subsector_work == "PETROLCHIMICA" |
+                                data$subsector_work == "SERVIZI DI PULIZIA E DISINFESTAZIONE." |
+                                data$subsector_work == "GOMMA E PLASTICA", 
+                              "chemical industry", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "ALTRI SERVIZI (SMALTIMENTO RIFIUTI, ASSOCIAZIONI CULTURALI, SPORTIVE, ECC.)"  |
+                                data$subsector_work == "ELETTRICITA', GAS E ACQUA" |
+                                data$subsector_work == "TRASPORTI E COMUNICAZIONI", 
+                              "structural services", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "ATTIVITA' IMMOBILIARI E PROFESSIONALI (INTEMEDIAZIONE FINANZIARIA,INFORMATICA, NOLEGGIO, VIGILANZA, PUBBLICITA', ECC.)"  |
+                                data$subsector_work == "TESSILE E ABBIGLIAMENTO" |
+                                data$subsector_work == "COMMERCIO", 
+                              "commerce", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "CARTA"  |
+                                data$subsector_work == "LEGNO", 
+                              "wood", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "COSTRUZIONI (EDILIZIA E INSTALLAZIONE/MANUTENZIONE DI IMPIANTI ELETTRICI, IDRAULICI E TERMICI)"  |
+                                data$subsector_work == "LAV. MINERALI NON METALLIFERI (VETRO, CEMENTO, CALCE E PIETRE ORNAMENTALI)", 
+                              "building", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "ISTRUZIONE PRIVATA"  |
+                                data$subsector_work == "UNIVERSITA' E ISTITUTI DI RICERCA", 
+                              "school", data$subsector_work)
+
+data$subsector_work <- ifelse(data$subsector_work == "ISTITUTI/ ORGANISMI COMUNALI"  |
+                                data$subsector_work == "ISTITUTI/ ORGANISMI PROVINCIALI" |
+                                data$subsector_work == "ISTITUTI/ ORGANISMI REGIONALI" |
+                                data$subsector_work == "MINISTERI (ISTRUZIONE PUBBLICA, SALUTE, DIFESA, ECC.)" |
+                                data$subsector_work == "PARASTATO", 
+                              "state", data$subsector_work)
+
+#Causal_Sector------------------------------------------------------------------
+levels(as.factor(data$causal_sector)) #7 levels 
+
+data$causal_sector <- ifelse(data$causal_sector == 'AGENTI BIOLOGICI',
+                             'Biological agents', data$causal_sector)
+data$causal_sector <-  ifelse(data$causal_sector == "AGENTI CHIMICI COMPOSTI ORGANICI" |
+                                data$causal_sector == "AGENTI CHIMICI INORGANICI",
+                              "Chimical agents", data$causal_sector)
+data$causal_sector <- ifelse(data$causal_sector == 'AGENTI FISICI',
+                             'Physical agents', data$causal_sector)
+data$causal_sector <- ifelse(data$causal_sector == 'FATTORI FISIOLOGICI',
+                             'physiological factors', data$causal_sector)
+data$causal_sector <- ifelse(data$causal_sector == 'FATTORI PSICOLOGICI',
+                             'psychological factors', data$causal_sector)
+data$causal_sector <- ifelse(data$causal_sector == 'FATTORI,MATERIALI E PRODOTTI INDUSTRIALI',
+                             'material factors', data$causal_sector)
+
+#nationality--------------------------------------------------------------------
+data$nationality <- ifelse(data$nationality == "America del Sud" |
+                             data$nationality == "America del Centro", 
+                           "Sud America", data$nationality) 
+data$nationality <- ifelse(data$nationality == "Australia", 
+                           "Asia", data$nationality) 
+data$nationality <- ifelse(data$nationality == "America del Nord", 
+                           "Nord America", data$nationality) 
+levels(data$nationality)
+```
+
+
+----------------------Missing Values--------------------------------------------
+
+Chunk 7: NAs Plot and analysis
+```{r}
+s_data <- sample_n(data, 10000) #Sample the dataset to improve the visualisation
+
+#-------------------------------------------------------------------------------
+x11()
+gg_miss_var(s_data)
+
+dataNA <- data.frame("variable" = miss_var_summary(data)[1],
+                     "missing value percent" = 
+                       round(miss_var_summary(data)[2] / nrow(data), 2))
+print(dataNA)
+##causal_code, causal_sector:  55%
+##sector_work, subsector_work: 54%
+##type_disease, group disease:  2.4%
+
+NAperc = round(sum(miss_var_summary(data)[2]) / (nrow(data)* ncol(data)), 2)
+#17% of missing values 
+
+#-------------------------------------------------------------------------------
+x11()
+vis_miss(s_data, warn_large_data = FALSE)
+
+#it seems to be a pattern between the missing values, let's check it:-----------
+
+#initialize a list of vectors
+attach(data)
+ccNA <- ifelse(is.na(causal_code), 1, 0) #causal code
+csNA <- ifelse(is.na(causal_sector), 1, 0) #causal sector
+swNA <- ifelse(is.na(sector_work), 1, 0) #sector work
+sswNA <- ifelse(is.na(subsector_work), 1, 0) #subsector work
+tdNA <- ifelse(is.na(type_disease), 1, 0) #type disease
+gdNA <- ifelse(is.na(group_disease), 1, 0) #group disease
+
+#create a matrix to check the correspondence 
+list = list(ccNA, csNA, swNA, sswNA, tdNA, gdNA)
+names <- c("causal code", "causal sector", "sector work", "subsector work", 
+           "type disease", "group disease")
+matrixNA = matrix(nrow = 6, ncol= 6)
+rownames(matrixNA) <- names 
+colnames(matrixNA) <- names
+
+for(i in 1:6){
+  for(j in 1:6){
+     matrixNA[i,j] <- round(sum(list[[i]]*list[[j]]) / min(sum(list[[i]]), sum(list[[j]])), 2)
+    
+  }
+}
+matrixNA
+
+#plot the correspondences
+
+#2 couples have perfect correspondence
+# big 'cluster' of correspondences between the first 4 variables
+rm(dataNA, list, matrixNA, s_data, ccNA, csNA, gdNA, i, j, names, NAperc, sswNA, 
+   swNA)
+```
+
+---------------------------Impute the Missing Values----------------------------
+
+Chunk 8: type diesese and group diesese
+```{r}
+sum(tdNA)/nrow(data) #only 2.4% of missing values, which are largely shared with the 
+#other variables, i'll remove them
+
+data <- data %>% drop_na(type_disease)
+
+#check--------------------------------------------------------------------------
+anyNA(data$type_disease)
+anyNA(data$group_disease)
+
+rm(tdNA)
+```
+
+Chunk 9: sector work
+```{r}
+levels(as.factor(data$sector_work)) #5 types: 
+#"artigianato", "agricolutura\pesca", "industria", "PA", "servizi"
+
+#in the dataset is present the variable: "gestione", which represent the
+#sector in which the person's employer operates.
+
+levels(as.factor(data$Gestione)) #3 types, "agricoltura", "industria\servizi", 
+#"stato"
+
+#check the correspondences between "gestione" and "sector work":--------------------------------------------------------------------------
+
+plotframe1 <- data.frame("sector" = data$Gestione, 
+                         "sector_work" = data$sector_work)
+plotframe1 <- plotframe1 %>% na.omit()
+x11()
+ggplot(data=plotframe1, aes(x=sector,  fill = sector_work)) +
+  geom_bar(stat="count")+
+  labs(x = "Sectors", y = "counts")+ theme_classic()
+#it can be seen that: 
+##A contains mainly "agricoltura e pesca" (AP)
+#I contains "servizi"(SER), "industria"(IND), "artigianato"(ART) with similar % 
+#S contains mainly "servizi" (SER)
+
+##We will use this information to impute the missing values on sector.----------
+
+Acount <- sum(with(plotframe1, sector == "A"))
+Icount <- sum(with(plotframe1, sector == "I"))
+Scount <- sum(with(plotframe1, sector == "S"))
+
+#A------------------------------------------------------------------------------
+A_AP <- sum(with(plotframe1, sector == "A" & 
+                   sector_work == "AGRICOLTURA E PESCA")) / Acount
+#since it is 98%, i'll assume that they coincide, so i simply substitute it. 
+
+data$sector_work <- ifelse(data$Gestione == "A" & is.na(data$sector_work), 
+                           "AGRICOLTURA E PESCA", data$sector_work)
+
+#I------------------------------------------------------------------------------
+I_SER <-  sum(with(plotframe1, sector == "I" & 
+                     sector_work == "SERVIZI")) / Icount  #22%
+I_IND <- sum(with(plotframe1, sector == "I" & 
+                    sector_work == "INDUSTRIA")) / Icount #40%
+I_ART <- sum(with(plotframe1, sector == "I" & 
+                    sector_work == "ARTIGIANATO")) / Icount #33%
+I_PA <- sum(with(plotframe1, sector == "I" & 
+                   sector_work == "PUBBLICA AMMINISTRAZIONE")) / Icount #3%
+I_AP <- sum(with(plotframe1, sector == "I" & 
+                   sector_work == "AGRICOLTURA E PESCA")) / Icount #2%
+
+#define the probability vector with the percentage found above: 
+I_prob <- c(rep("SERVIZI", 22), rep("INDUSTRIA", 40), rep("ARTIGIANATO", 33),
+          rep("PUBBLICA AMMINISTRAZIONE", 3), rep("AGRICOLTURA E PESCA", 2))
+
+#impute the missing values in the rows in which Gestione = I--------------------
+set.seed(19)
+data$sector_work <- ifelse(data$Gestione == "I" & is.na(data$sector_work), 
+                           sample(I_prob, 1), data$sector_work)
+
+#S------------------------------------------------------------------------------
+#same process
+S_PA <- sum(with(plotframe1, sector == "S" & 
+                   sector_work == "PUBBLICA AMMINISTRAZIONE")) / Scount #70%
+S_SER <- sum(with(plotframe1, sector == "S" &
+                    sector_work == "SERVIZI")) / Scount #15%
+S_IND <- sum(with(plotframe1, sector == "S" &
+                    sector_work == "INDUSTRIA")) / Scount #11%
+S_AP <- sum(with(plotframe1, sector == "S" &
+                   sector_work == "AGRICOLTURA E PESCA")) / Scount #4%
+S_ART <- sum(with(plotframe1, sector == "S" &
+                    sector_work == "ARTIGIANATO")) / Scount #0.6% #discarded
+
+#probability vector
+S_prob <- c(rep("SERVIZI", 15), rep("INDUSTRIA", 11),
+            rep("PUBBLICA AMMINISTRAZIONE", 70), rep("AGRICOLTURA E PESCA", 4))
+
+#impute
+set.seed(19)
+data$sector_work <- ifelse(data$Gestione == "S" & is.na(data$sector_work), 
+                           sample(S_prob, 1), data$sector_work)
+
+#check--------------------------------------------------------------------------
+anyNA(data$sector_work)
+
+rm(plotframe1, A_AP, Acount, I_AP, I_ART, I_IND, I_PA, I_prob, I_SER, Icount, 
+   S_AP, S_ART, S_IND, S_PA, S_SER, Scount, S_prob)
+```
+
+Chunk 10: subsector work
+```{r}
+#same process seen before:
+
+#check the correspondences between "sector work" and "subsector work":----------
+plotframe2 <- data.frame("sector" = data$sector_work,
+                         "sub" = data$subsector_work)
+plotframe2 <- plotframe2 %>% na.omit()
+plotframe2$sub <- str_wrap(plotframe2$sub, width = 20)
+
+x11()
+ggplot(data=plotframe2, aes(x=sector,  fill = sub)) +
+  geom_bar(stat="count")+
+  labs(x = "Sectors", y = "counts")+ theme_classic() +
+  guides(x =  guide_axis(angle = 30)) +
+  NULL
+
+#it can be seen that AGRICOLTURA E PESCA and PUBBLICA AMMINISTRAZIONE contain 
+#almost only 1 sector, so i'll use only that:-----------------------------------
+data$subsector_work <- ifelse(data$sector_work == "AGRICOLTURA E PESCA" &
+                                is.na(data$subsector_work), 
+                              "farming", data$subsector_work)
+
+data$subsector_work <- ifelse(data$sector_work == "PUBBLICA AMMINISTRAZIONE" &
+                                is.na(data$subsector_work), 
+                           "state", data$subsector_work)
+
+#for the others i repeat the process seen above with Gestione and Sector work
+
+#ARTIGIANATO--------------------------------------------------------------------
+A_per <- c()
+sectors <- c(levels(as.factor(data$subsector_work)))
+Acount <- sum(with(plotframe2, sector == "ARTIGIANATO"))
+
+for(i in 1: length(sectors)){
+  A_per[i] <-  sum(with(plotframe2, sector == "ARTIGIANATO" & 
+                     sub == sectors[i])) / Acount
+  
+}
+
+A_Perc <- data.frame("sectors" = sectors, "percentage" = round(A_per*100, 2))
+
+#define the probability vector: 
+A_prob <- c(rep("building", 68), rep("chemical industry", 3), 
+            rep("commerce", 3), rep("food", 5), rep("manifactures", 2), 
+            rep("metal working", 12), rep("structural services", 2),
+            rep("wood", 2))
+
+set.seed(19)
+data$subsector_work <- ifelse(data$sector_work == "ARTIGIANATO" &
+                                is.na(data$subsector_work), 
+                           sample(A_prob, 1), data$subsector_work)
+
+#INDUSTRIA----------------------------------------------------------------------
+I_per <- c()
+sectors <- c(levels(as.factor(data$subsector_work)))
+Icount <- sum(with(plotframe2, sector == "INDUSTRIA"))
+
+for(i in 1: length(sectors)){
+  I_per[i] <-  sum(with(plotframe2, sector == "INDUSTRIA" & 
+                     sub == sectors[i])) / Icount
+  
+}
+
+I_Perc <- data.frame("sectors" = sectors, "percentage" = round(I_per*100, 2))
+
+#define the probability vector: 
+I_prob <- c(rep("building", 37), rep("chemical industry", 7), 
+            rep("commerce", 4), rep("food", 10), rep("manifactures", 2), 
+            rep("metal working", 33), rep("mining", 1), 
+            rep("structural services", 2), rep("wood", 5))
+
+set.seed(19)
+data$subsector_work <- ifelse(data$sector_work == "INDUSTRIA" &
+                                is.na(data$subsector_work), 
+                           sample(I_prob, 1), data$subsector_work)
+
+#SERVIZI------------------------------------------------------------------------
+S_per <- c()
+sectors <- c(levels(as.factor(data$subsector_work)))
+
+Scount <- sum(with(plotframe2, sector == "SERVIZI"))
+
+for(i in 1: length(sectors)){
+  S_per[i] <-  sum(with(plotframe2, sector == "SERVIZI" & 
+                     sub == sectors[i])) / Scount
+  
+}
+S_Perc <- data.frame("sectors" = sectors, "percentage" = round(S_per*100, 2))
+
+
+
+#define the probability vector: 
+S_prob <- c(rep("chemical industry", 9), rep("commerce", 18),
+            rep("healthcare", 17), rep("structural services", 47), 
+            rep("turism", 9))
+
+set.seed(19)
+data$subsector_work <- ifelse(data$sector_work == "SERVIZI" &
+                                is.na(data$subsector_work), sample(S_prob, 1), 
+                              data$subsector_work)
+
+#check--------------------------------------------------------------------------
+anyNA(data$subsector_work)
+
+rm(plotframe2, A_Perc, I_Perc, S_Perc)
+```
+
+Chunk 11: Causal code and Causal sector
+```{r}
+#Using a random forest to impute MVs--------------------------------------------
+data <- as.data.frame(unclass(data), stringsAsFactors = TRUE)
+prov <- data %>% select(c(type_disease))
+data <- data %>% select(-c(type_disease))
+```
+
+Chunk 12: Run the RF (4m, iteration 4)
+```{r}
+start.time <- Sys.time()
+#-------------------------------------------------------------------------------
+
+data_imp <- missForest(data, maxiter = 10, ntree = 100, verbose = TRUE)
+
+#-------------------------------------------------------------------------------
+end.time <- Sys.time()
+time.taken <- round(end.time - start.time,2)
+time.taken  #4 minutes
+```
+
+Chunk 13: Save the matrix result 
+```{r}
+OOBError <- data_imp$OOBerror #0.0001
+data2 <- data.frame(data_imp$ximp)
+
+#apply the results to the original dataset--------------------------------------
+data$causal_code <- data2$causal_code
+data$causal_sector <- data2$causal_sector %>% str_to_lower() %>% as.factor()
+data$type_disease <- prov$type_disease
+
+#check--------------------------------------------------------------------------
+anyNA(data) #no missing data
+
+#reordering---------------------------------------------------------------------
+col_order <- c("gender", "nationality", "region", "Gestione", "sector_work", 
+               "subsector_work", "group_disease", "type_disease", "causal_code",
+               "causal_sector", "absestos", "ILW","death")
+data <- data[, col_order]
+
+#save the results---------------------------------------------------------------
+write.table(data, "ImpData.csv", sep = ";", row.names = FALSE, dec = ".",
+            quote = TRUE)
+
+rm(prov, data2, data_imp, A_per, A_prob, Acount, I_per, I_prob, 
+   Icount, S_per, S_prob, Scount, sectors, col_order, end.time, i, start.time, 
+   OOBError, time.taken)
+```

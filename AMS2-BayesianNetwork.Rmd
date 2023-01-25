@@ -1,0 +1,422 @@
+---
+title: "AMS_2"
+author: "GuidoGIacomoMussini"
+date: "2023-01-14"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+Chunk 1: Libraries and Functions
+```{r}
+gc()
+library(readr)
+library(tidyverse)
+library(dplyr)
+library(naniar)
+library(superheat)
+library(stringr)
+library(missForest)
+library(grid)
+library(gridExtra)
+library(bnlearn)
+library(network)
+library(Rgraphviz)
+library(graph)
+library(gRain)
+library(bnviewer)
+library(Rmpfr)
+
+#functions----------------------------------------------------------------------
+map <- function(joint) {
+  stopifnot(!is.null(dim(joint)))
+  ind_max <- which(sapply(joint, function(v) isTRUE(all.equal(max(joint), v))))
+  if (length(ind_max) > 1) {
+    warning("More than one MAP. Chosing one randomly.")
+    oind_max <- ind_max
+    ind_max <- sample(ind_max, size = 1)
+    stopifnot(ind_max %in% oind_max)
+  }
+  ind <- arrayInd(ind_max, .dim = dim(joint))
+  state <- mapply('[', dimnames(joint), ind)
+  prob <- joint[ind_max]
+  list(state=state, prob=prob)
+}
+#https://gauss.inf.um.es/umur/xjurponencias/talleres/J3.pdf
+
+cpq.fun <- function(EvidenceNode, EvidenceState, ObjectiveNode) {
+k = setEvidence(jn, nodes = EvidenceNode, states = EvidenceState)
+list <- round(querygrain(k, nodes = ObjectiveNode, type = "joint"), 2)
+return(sort(list, decreasing = TRUE))
+}
+```
+
+
+Chunk 2: Import final dataset
+```{r}
+setwd("C:/Users/Guido/Desktop/Advanced Multivariate Statistics/Project/INAIL/WorkingDirectory")
+
+data <- read_delim("ImpData.csv", delim = ";", escape_double = FALSE,
+                   trim_ws = TRUE)
+```
+
+Chunk 3: Removing useless variables for BN and renaming
+```{r}
+data <- data %>% select(-c(type_disease, causal_code, Gestione, sector_work))
+
+#rename data for better comprension---------------------------------------------
+data <- data %>% rename(
+  work.sector = subsector_work,
+  disease = group_disease,
+  injury.factor = causal_sector, 
+  asbestos = absestos, 
+  impairment.level = ILW
+)
+
+#factor-------------------------------------------------------------------------
+data <- as.data.frame(unclass(data), stringsAsFactors = TRUE)
+data$death <- as.factor(data$death)
+
+```
+
+Chunk 4: Number of Levels
+```{r}
+level_list <- list() 
+colnames <- colnames(data)
+
+for(i in 1 : length(colnames)){
+  level_list[[i]] <- colnames[i]
+  level_list[[i]][2] <- length(table(data[colnames[i]]))
+}
+
+rm(level_list)
+```
+
+Chunk 5: Bayesian Network
+```{r}
+#hill-climbing Algorithm--------------------------------------------------------
+bn <- hc(data)
+x11()
+plot(bn) 
+```
+
+Chunk 6: Evaluation of the relations
+```{r}
+#INSENSATE----------------------------------------------------------------------
+#gender -> disease
+#gender -> impairment.level
+#region -> gender
+#impairment.level -> death
+
+#removing
+bn <- drop.arc(bn, "gender", "disease")
+bn <- drop.arc(bn, "gender", "impairment.level")
+bn <- drop.arc(bn, "region", "gender")
+bn <- drop.arc(bn, "impairment.level", "death")
+bn <- drop.arc(bn, "work.sector", "impairment.level")
+
+
+#INVERSE------------------------------------------------------------------------
+#disease -> injury.factor
+#injury.factor -> asbestos
+
+#reverse
+bn <- reverse.arc(bn, "disease", "injury.factor", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- reverse.arc(bn, "injury.factor", "asbestos", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+
+#MANCANTI-----------------------------------------------------------------------
+#region -> asbestos
+#disease -> impairment.level
+#injury.factor -> impairment.level
+#asbestos -> death
+
+#adding
+bn <- set.arc(bn, "region", "asbestos", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "disease", "impairment.level", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "injury.factor", "impairment.level", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+bn <- set.arc(bn, "asbestos", "death", check.cycles = TRUE, 
+        check.illegal = TRUE, debug = FALSE)
+
+#Plots--------------------------------------------------------------------------
+group <- list(c("gender", "nationality", "region"), 
+                            c("work.sector", "injury.factor", "asbestos"), 
+                            c("disease"), 
+                            c("impairment.level", "death"))
+
+x11()
+plot(bn)
+
+
+x11()
+gp1 <- graphviz.plot(bn, groups = group, layout = "dot")
+graph::nodeRenderInfo(gp1) <- list(fontsize=30)
+Rgraphviz::renderGraph(gp1)
+
+#Interactive plot---------------------------------------------------------------
+viewer(bn,
+     bayesianNetwork.width = "100%",
+     bayesianNetwork.height = "80vh",
+     bayesianNetwork.layout = "layout_with_sugiyama",
+     bayesianNetwork.title="Professional Disease",
+     bayesianNetwork.subtitle = "",
+     bayesianNetwork.footer = ""
+)
+
+rm(gp1, group)
+```
+
+Chunk 7: Arc Strength
+```{r}
+#Bic strength-------------------------------------------------------------------
+
+bic_str <- arc.strength(bn, data, criterion = 'bic')
+
+bic_str$strength <- -1*round(bic_str$strength / abs(min(bic_str$strength)), 3)
+
+bic_str$label <- paste(bic_str$from, "->", bic_str$to)
+bic_str$pos <- ifelse(bic_str$strength>0,1,0)
+bic_str$strength <- abs(bic_str$strength)
+bic_str<- bic_str %>% select(-c(from, to))
+
+ bicplot <- ggplot(bic_str, aes(x=label, y=strength)) +
+ geom_bar(stat="identity", position=position_dodge(), aes(fill  = pos > 0 ) )+
+   theme(legend.position="none") +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  xlab("")+ ylab("")+labs(title = "BIC Criterion")+
+  theme(panel.background = element_rect(fill = '#ffffff'), 
+        panel.grid.major= element_blank(), panel.grid.minor= element_blank(), 
+        plot.title = element_text(hjust = 0.9) )+
+  coord_flip()+  scale_y_reverse()
+
+#Aic Strength-------------------------------------------------------------------
+
+aic_str <- arc.strength(bn, data, criterion = 'aic')
+
+aic_str$strength <- -1*(round(aic_str$strength / abs(min(aic_str$strength)), 3))
+
+aic_str$label <- paste(aic_str$from, "->", aic_str$to)
+aic_str$pos <- ifelse(aic_str$strength>0,1,0)
+aic_str$strength <- abs(aic_str$strength)
+aic_str<- aic_str %>% select(-c(from, to))
+
+
+aicplot <- ggplot(aic_str, aes(x=label, y=strength)) +
+ geom_bar(stat="identity", position=position_dodge(), aes(fill  = pos > 0 ) )+
+    theme(legend.position="none") +
+   theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))+
+  xlab("")+ ylab("")+labs(title = " AIC Criterion")+
+  theme(panel.background = element_rect(fill = '#ffffff'), 
+        panel.grid.major= element_blank(), panel.grid.minor= element_blank(), axis.text.y=element_blank(), axis.ticks.y=element_blank(), 
+        plot.title = element_text(hjust = 0.1) )+
+  coord_flip()
+
+x11()
+grid.arrange(bicplot, aicplot, ncol = 2)
+
+#arc strength-------------------------------------------------------------------
+arc_str <- arc.strength(bn, data)
+x11()
+strength.plot(bn, arc_str)
+
+#boot strength (5m)-------------------------------------------------------------
+set.seed(1)
+boot_str <- boot.strength(data, R = 100, m = nrow(data), algorithm = 'hc')
+
+avg.boot_str = averaged.network(boot_str, threshold = 0.8)
+
+x11()
+plot(avg.boot_str)
+
+#comparison between graphs------------------------------------------------------
+
+c1 <- compare(avg.boot_str, bn)
+
+x11()
+graphviz.compare(bn, avg.boot_str, diff.args = c(tp.col= "green", 
+                                                 fp.col = "blue",
+                                                 fn.col = "red"))
+
+rm(aic_str, aicplot, arc_str, bic_str, bicplot, c1)
+```
+
+Chunk 8: Conditional Probability tables
+```{r}
+cpt <- bn.fit(bn, data = data)
+
+x11()
+graphviz.chart(cpt)
+```
+
+Chunk 9: Queries
+```{r}
+jn = compile(as.grain(cpt))
+
+D_jn = setEvidence(jn, nodes = "death", states = "1")
+D_MAP = querygrain(D_jn, type = "joint", nodes = )
+map.D_MAP <- map(D_MAP)
+# $state
+#             gender        nationality             region 
+#                "M"           "Italia"              "Sud" 
+#        work.sector           asbestos      injury.factor 
+#    "metal working"                "S" "material factors" 
+#            disease   impairment.level 
+#           "Cancer"              "low" 
+# 
+# $prob
+# [1] 0.05862774
+
+I_jn = setEvidence(jn, nodes = "impairment.level", states = "high")
+I_MAP = querygrain(I_jn, type = "joint", nodes = )
+map.I_MAP <- map(I_MAP)
+# $state
+#             gender        nationality             region 
+#                "M"           "Italia"              "Sud" 
+#        work.sector           asbestos      injury.factor 
+#    "metal working"                "S" "material factors" 
+#            disease              death 
+#           "Cancer"                "1" 
+# 
+# $prob
+# [1] 0.06570557
+
+M_jn = setEvidence(jn, nodes = "disease", states = "circulatory system diseases")
+M_MAP = querygrain(M_jn, type = "joint", nodes = )
+map.M_MAP <- map(M_MAP)
+# $state
+#                  gender             nationality 
+#                     "M"                "Italia" 
+#                  region             work.sector 
+#                "Centro"                  "food" 
+#                asbestos           injury.factor 
+#                     "N" "physiological factors" 
+#        impairment.level                   death 
+#                   "low"                     "0" 
+# 
+# $prob
+# [1] 0.1489847
+
+T_jn = setEvidence(jn, nodes = "disease", states = "Trauma and poisoning")
+T_MAP = querygrain(T_jn, type = "joint", nodes = )
+map.T_MAP <- map(T_MAP)
+# $state
+#                  gender             nationality 
+#                     "M"                "Italia" 
+#                  region             work.sector 
+#                "Centro"                  "food" 
+#                asbestos           injury.factor 
+#                     "N" "physiological factors" 
+#        impairment.level                   death 
+#                   "low"                     "0" 
+# 
+# $prob
+# [1] 0.1369804
+
+IF_jn = setEvidence(jn, nodes = "injury.factor", states = "material factors")
+IF_MAP = querygrain(IF_jn, type = "joint", nodes = )
+map.IF_MAP <- map(IF_MAP)
+# $state
+#                        gender                   nationality 
+#                           "M"                      "Italia" 
+#                        region                   work.sector 
+#                         "Sud"               "metal working" 
+#                      asbestos                       disease 
+#                           "S" "Respiratory system diseases" 
+#              impairment.level                         death 
+#                         "low"                           "0" 
+# 
+# $prob
+# [1] 0.07496556
+IF1_jn = setEvidence(jn, nodes = "injury.factor", states = "chimical agents")
+IF1_MAP = querygrain(IF1_jn, type = "joint", nodes = )
+map.IF1_MAP <- map(IF1_MAP)
+# $state
+#           gender      nationality           region      work.sector 
+#              "M"         "Italia"         "Centro"           "food" 
+#         asbestos          disease impairment.level            death 
+#              "N"         "Cancer"            "low"              "1" 
+# 
+# $prob
+# [1] 0.05452243
+
+#Conditional probability queries------------------------------------------------
+
+cpq.fun("gender", "F", "work.sector")
+
+cpq.fun("gender", "M", "work.sector")
+
+cpq.fun("work.sector", "food", "disease")
+```
+
+Chunk 10: Trying to don't include the Italians
+```{r}
+f.data <- data %>% filter(nationality != "Italia")
+
+#hill-climbing Algorithm--------------------------------------------------------
+f.bn <- hc(f.data)
+
+#Plot---------------------------------------------------------------------------
+x11()
+gp2 <- graphviz.plot(f.bn, groups = group, layout = "dot")
+graph::nodeRenderInfo(gp2) <- list(fontsize=30)
+Rgraphviz::renderGraph(gp2)
+
+#Fit----------------------------------------------------------------------------
+f.cpt <- bn.fit(f.bn, data = f.data)
+
+#Queries------------------------------------------------------------------------
+f.jn = compile(as.grain(f.cpt))
+
+f.D_jn = setEvidence(f.jn, nodes = "impairment.level", states = "high")
+f.D_MAP = querygrain(f.D_jn, type = "joint", nodes = )
+f.map.D_MAP <- map(f.D_MAP)
+# $state
+#                                                gender 
+#                                                   "M" 
+#                                           nationality 
+#                                              "Europa" 
+#                                                region 
+#                                          "Nord - Est" 
+#                                           work.sector 
+#                                       "metal working" 
+#                                         injury.factor 
+#                               "physiological factors" 
+#                                               disease 
+# "osteomuscular system and connective tissue diseases" 
+#                                              asbestos 
+#                                                   "N" 
+#                                                 death 
+#                                                   "0" 
+# 
+# $prob
+# [1] 0.04839339
+
+f1.D_jn = setEvidence(f1.jn, nodes = "death", states = "1")
+f1.D_MAP = querygrain(f1.D_jn, type = "joint", nodes = )
+f1.map.D_MAP <- map(f1.D_MAP)
+# $state
+#                  gender             nationality 
+#                     "M"                "Europa" 
+#                  region             work.sector 
+#            "Nord - Est"                  "food" 
+#           injury.factor                 disease 
+# "physiological factors"                "Cancer" 
+#                asbestos        impairment.level 
+#                     "N"                   "low" 
+# 
+# $prob
+# [1] 0.07809532
+```
+
+
+
+
+
+
+
+
+
+
